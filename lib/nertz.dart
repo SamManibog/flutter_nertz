@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_nertz/card_widgets.dart';
+import 'package:flutter_nertz/nertz_networking.dart';
 
 enum CardColor { red, black }
 
@@ -244,7 +247,24 @@ class RotateStockCommand extends PlayerCommand {
   const RotateStockCommand() : super(false);
 }
 
+/// a command to move cards in a player's state, works asynchronously
+sealed class AsyncPlayerCommand {
+  final bool needsClearHand;
+
+  const AsyncPlayerCommand(this.needsClearHand);
+}
+
+/// attempts to place the card from the player's hand into the lake
+class HandToLakeCommand extends AsyncPlayerCommand {
+  final int lakeIndex;
+
+  const HandToLakeCommand(this.lakeIndex) : super(false);
+}
+
 class PlayerState {
+  /// the lake that the player looks at
+  final ClientLake lake;
+
   /// the contents and position of the player's hand
   (RiverCardStack, HandOrigin, Offset)? _hand;
 
@@ -260,16 +280,43 @@ class PlayerState {
   /// the player's nertz pile
   final List<PlayingCard> _nertzPile;
 
+  /// when true, signifies that command handling is frozen until finalizePlaceAttemt is called
+  bool waitForPlaceAttempt = false;
+
   /// whether the top card of the nertz pile should be face up
   bool _showNertzTopCard = true;
 
+  PlayerState({
+    required this.lake,
+    required List<RiverCardStack> riverStacks,
+    required List<PlayingCard> stockPile,
+    required List<PlayingCard> wastePile,
+    required List<PlayingCard> nertzPile,
+  }) : _nertzPile = nertzPile,
+       _wastePile = wastePile,
+       _stockPile = stockPile,
+       _riverStacks = riverStacks {
+    assert(riverStacks.length == 4);
+  }
+
+  static PlayerState newRandom(ClientLake lake) {
+    List<PlayingCard> deck = PlayingCard.makeDeck()..shuffle();
+    return PlayerState(
+      lake: lake,
+      riverStacks: [
+        RiverCardStack(cards: [deck[0]]),
+        RiverCardStack(cards: [deck[1]]),
+        RiverCardStack(cards: [deck[2]]),
+        RiverCardStack(cards: [deck[3]]),
+      ],
+      nertzPile: deck.sublist(4, 4 + 13),
+      stockPile: deck.sublist(4 + 13),
+      wastePile: [],
+    );
+  }
+
   /// whether the top card of the nertz pile should be face up
   bool get showNertzTopCard => _showNertzTopCard;
-
-  /// gets the size of the given river stack
-  int riverStackSize(int index) {
-    return _riverStacks[index].cards.length;
-  }
 
   /// gets the size of the waste pile
   int get wasteSize => _wastePile.length;
@@ -279,6 +326,11 @@ class PlayerState {
 
   /// gets the size of the stock pile
   int get stockSize => _stockPile.length;
+
+  /// gets the size of the given river stack
+  int riverStackSize(int index) {
+    return _riverStacks[index].cards.length;
+  }
 
   /// gets the painter for the nertz pile, if it exists
   /// should b elayerd underneath the result of nertzInteractable
@@ -356,33 +408,6 @@ class PlayerState {
       onDragStarted: onDragStarted,
       onDragUpdated: onDragUpdated,
       onDragEnded: onDragEnded,
-    );
-  }
-
-  PlayerState({
-    required List<RiverCardStack> riverStacks,
-    required List<PlayingCard> stockPile,
-    required List<PlayingCard> wastePile,
-    required List<PlayingCard> nertzPile,
-  }) : _nertzPile = nertzPile,
-       _wastePile = wastePile,
-       _stockPile = stockPile,
-       _riverStacks = riverStacks {
-    assert(riverStacks.length == 4);
-  }
-
-  static PlayerState newRandom() {
-    List<PlayingCard> deck = PlayingCard.makeDeck()..shuffle();
-    return PlayerState(
-      riverStacks: [
-        RiverCardStack(cards: [deck[0]]),
-        RiverCardStack(cards: [deck[1]]),
-        RiverCardStack(cards: [deck[2]]),
-        RiverCardStack(cards: [deck[3]]),
-      ],
-      nertzPile: deck.sublist(4, 4 + 13),
-      stockPile: deck.sublist(4 + 13),
-      wastePile: [],
     );
   }
 
@@ -470,9 +495,56 @@ class PlayerState {
     return;
   }
 
+  Future<bool> handleAsyncCommand(AsyncPlayerCommand command) async {
+    if (waitForPlaceAttempt) {
+      print(
+        "Waiting for place attempt to resolve, cannot perform another action",
+      );
+      return false;
+    }
+
+    if (command.needsClearHand && _hand != null) {
+      return false;
+    }
+
+    switch (command) {
+      case HandToLakeCommand _:
+        if (_hand == null) {
+          return false;
+        }
+        if (_hand!.$1.cards.length != 1) {
+          return false;
+        }
+        waitForPlaceAttempt = true;
+        final Completer<bool> placeAttemptCompleter = Completer();
+        lake.placeCard(_hand!.$1.cards[0], command.lakeIndex).then((
+          bool successful,
+        ) {
+          print(
+            successful ? "Place attempt successful" : "Place attempt failed",
+          );
+          waitForPlaceAttempt = false;
+          if (successful) {
+            _emptyHand();
+          } else {
+            _returnHandToOrigin();
+          }
+          placeAttemptCompleter.complete(successful);
+        });
+        return placeAttemptCompleter.future;
+    }
+  }
+
   /// handles a command to move cards in the player's state
   /// returns true if the command was executed successfully
   bool handleCommand(PlayerCommand command) {
+    if (waitForPlaceAttempt) {
+      print(
+        "Waiting for place attempt to resolve, cannot perform another action",
+      );
+      return false;
+    }
+
     if (command.needsClearHand && _hand != null) {
       return false;
     }
@@ -489,6 +561,7 @@ class PlayerState {
           const Offset(0, 0),
         );
         break;
+
       case WasteToHandCommand _:
         if (_wastePile.isEmpty) {
           return false;
@@ -499,6 +572,7 @@ class PlayerState {
           const Offset(0, 0),
         );
         break;
+
       case NertzToHandCommand _:
         if (_nertzPile.isEmpty) {
           return false;
@@ -510,6 +584,7 @@ class PlayerState {
         );
         _showNertzTopCard = false;
         break;
+
       case HandToRiverCommand _:
         if (_hand == null) {
           return false;
@@ -520,18 +595,22 @@ class PlayerState {
         }
         _emptyHand();
         break;
+
       case CancelHandCommand _:
         if (_hand == null) {
           return false;
         }
         _returnHandToOrigin();
         break;
+
       case FeedWasteCommand _:
         _feedWaste();
         break;
+
       case ResetStockCommand _:
         _resetStock();
         break;
+
       case RotateStockCommand _:
         if (_wastePile.isNotEmpty) {
           return false;

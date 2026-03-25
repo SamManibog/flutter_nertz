@@ -2,8 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_nertz/pages.dart';
 
 // todo:
-// - refactor to include client lake in player state
-// - implement HandToLake command and its handler
 // - implement UDP broadcasts for LAN game discovery and connection
 // - implement lobby page with player list and start game button
 // - implement player kicking functionality for hosts
@@ -76,67 +74,8 @@ class _MyAppContentsState extends State<MyAppContents> {
         currentPage = GamePage(mainState: mainState);
         break;
     }
-    return SafeArea(child: currentPage);
-  }
-}
-
-/*
-class TestHomePage extends StatefulWidget {
-  const TestHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
-
-  @override
-  State<TestHomePage> createState() => _TestHomePageState();
-}
-
-class _TestHomePageState extends State<TestHomePage> {
-  late final PlayerState playerState;
-
-  @override
-  void initState() {
-    super.initState();
-    playerState = PlayerState.newRandom();
-  }
-
-  @override
-  Widget build(BuildContext context) {
     return Scaffold(
-      body: Center(
-        child: Column(
-          children: [
-            PlayerUi(playerState: playerState),
-            FilledButton(
-              onPressed: () async {
-                final server =
-                    await NertzServer.bind('localhost', 8080);
-                final client = await NertzClient.connect(
-                  host: '127.0.0.1',
-                  port: 8080,
-                  joinKey: server.joinKey,
-                  playerName: "Sam",
-                );
-                if (client == null) {
-                  print('Failed to connect to server');
-                } else {
-                  print('Client connected with id ${client.playerId}');
-                }
-              },
-              child: SizedBox(width: 40, height: 40),
-            ),
-          ],
-        ),
-      ),
+      body: SafeArea(child: currentPage)
     );
   }
 }
-*/

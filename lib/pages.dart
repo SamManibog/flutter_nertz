@@ -61,13 +61,18 @@ class HostingPage extends StatefulWidget {
   final MainState mainState;
   final Function() onGameStart;
 
-  const HostingPage({super.key, required this.mainState, required this.onGameStart});
+  const HostingPage({
+    super.key,
+    required this.mainState,
+    required this.onGameStart,
+  });
 
   @override
   State<HostingPage> createState() => _HostingPageState();
 }
 
 class _HostingPageState extends State<HostingPage> {
+  static const double marginSize = 30;
   late final MainState mainState;
 
   @override
@@ -75,49 +80,102 @@ class _HostingPageState extends State<HostingPage> {
     super.initState();
     mainState = widget.mainState;
 
-    NertzServer.bind('localhost', 8080).then((server) {
-      mainState.server = server;
-      NertzClient.connect(
-        host: '127.0.0.1',
-        port: 8080,
-        joinKey: server.joinKey,
-        playerName: "Sam",
-        onGameStart: () {
-          mainState.page = PageType.game;
-          widget.onGameStart();
-        },
-      ).then((client) {
-        if (client == null) {
-          print('Failed to connect to same-device server');
-        } else {
-          print(
-            'Client connected to same-device serverwith id ${client.playerId}',
-          );
-          setState(() {
-            mainState.client = client;
-          });
-        }
+    NertzServer.bind(
+      address: 'localhost',
+      port: 8080,
+      hostPlayerName: "host player",
+      onGameStart: () {
+        mainState.page = PageType.game;
+        widget.onGameStart();
+      },
+    ).then((result) {
+      setState(() {
+        mainState.server = result.server;
+        mainState.client = result.client;
       });
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final List<Widget> children = [];
-    if (mainState.client != null) {
-      children.add(
-        Text('Hosting game with join key: ${mainState.server!.joinKey}'),
-      );
-      children.add(
-        FilledButton(
-          onPressed: () => mainState.server?.startGame(),
-          child: Text('Start Game'),
+    if (mainState.client == null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: .start,
+          children: [
+            SizedBox(height: marginSize),
+            Text('Hosting game...'),
+          ],
         ),
       );
-    } else {
-      children.add(Text('Setting up server...'));
     }
-    return Column(spacing: 20, children: children);
+    final List<Widget> children = [
+      Text('Join Code:', style: Theme.of(context).textTheme.headlineSmall),
+      Text(
+        mainState.server!.joinKey,
+        style: Theme.of(context).textTheme.headlineLarge,
+      ),
+      SizedBox(height: 20),
+      Text(
+        "${mainState.server!.hostPlayerName}'s Server",
+        style: Theme.of(context).textTheme.headlineMedium,
+      ),
+      Divider(indent: 20, endIndent: 20),
+    ];
+    for (int playerId in mainState.server!.playerIds) {
+      var cardChildren = <Widget>[
+        Text(
+          mainState.server!.clientName(playerId),
+          style: Theme.of(context).textTheme.titleLarge,
+        ),
+      ];
+      if (playerId != mainState.server!.hostId) {
+        cardChildren.add(
+          TapRegion(
+            child: Icon(Icons.close),
+            onTapInside: (_) => setState(() {
+              mainState.server!.kickPlayer(playerId);
+            }),
+          ),
+        );
+      }
+      children.add(
+        Container(
+          alignment: .center,
+          padding: EdgeInsets.symmetric(horizontal: 20, vertical: 5),
+          decoration: BoxDecoration(
+            color: Colors.grey[300],
+            borderRadius: BorderRadius.circular(10),
+          ),
+          width: 300,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: cardChildren,
+          ),
+        ),
+      );
+    }
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.max,
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          SizedBox(height: marginSize),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.max,
+              mainAxisAlignment: MainAxisAlignment.start,
+              children: children,
+            ),
+          ),
+          FilledButton(
+            onPressed: () => mainState.server?.startGame(),
+            child: Text('Start Game'),
+          ),
+          SizedBox(height: marginSize),
+        ],
+      ),
+    );
   }
 }
 

@@ -4,6 +4,30 @@ import 'dart:io';
 import 'dart:math';
 import 'package:flutter_nertz/nertz.dart';
 
+final playerNameRegex = RegExp(r'^[a-zA-Z0-9_!.? ]+$');
+final maxNameLength = 20;
+
+/// returns true if the given string is a valid player name
+bool isValidPlayerName(String name) {
+  return name.isNotEmpty &&
+      name.length <= maxNameLength &&
+      playerNameRegex.hasMatch(name);
+}
+
+/// fixes an invalid player name by removing invalid characters and truncating to the maximum length
+String fixPlayerName(String name) {
+  final validChars = name
+      .split('')
+      .where((char) => playerNameRegex.hasMatch(char))
+      .join();
+  if (validChars.isEmpty) {
+    throw Exception("Player name '$name' is invalid and cannot be fixed");
+  }
+  return validChars.length <= maxNameLength
+      ? validChars
+      : validChars.substring(0, maxNameLength);
+}
+
 /// a map from network message types to their numeric type ids
 const Map<Type, int> typeToIdMap = {
   LakePlacementRequest: 0,
@@ -68,11 +92,11 @@ class JoinRequest extends NertzNetworkMessage {
   final String joinKey;
   final String name;
 
-  const JoinRequest({required this.joinKey, required this.name})
+  JoinRequest({required this.joinKey, required this.name})
     : assert(name.length > 0, "Name cannot be empty"),
       assert(
-        name.length <= NertzServer.maxNameLength,
-        "Name cannot be longer than ${NertzServer.maxNameLength} characters",
+        isValidPlayerName(name),
+        "Name contains invalid characters: $name, only letters, numbers, and _!.? are allowed",
       );
 
   @override
@@ -83,9 +107,7 @@ class JoinRequest extends NertzNetworkMessage {
   static JoinRequest? deserialize(String data) {
     final decoded = jsonDecode(data);
     final String? name = decoded["name"];
-    if (name == null ||
-        name.isEmpty ||
-        name.length > NertzServer.maxNameLength) {
+    if (name == null || !isValidPlayerName(name)) {
       return null;
     }
     return JoinRequest(joinKey: decoded["joinKey"], name: decoded["name"]);
@@ -246,12 +268,7 @@ class NertzClient {
       NertzClient client = NertzClient._(socket, onGameStart);
 
       // request to join the game with the given join key
-      late final String safeName;
-      if (playerName.length > NertzServer.maxNameLength) {
-        safeName = playerName.substring(0, NertzServer.maxNameLength);
-      } else {
-        safeName = playerName;
-      }
+      late final String safeName = fixPlayerName(playerName);
 
       print(
         "Sending join request with name '$safeName' and join key '$joinKey'",
@@ -313,6 +330,7 @@ class NertzClient {
           data,
         );
         if (placementConfirmation != null) {
+          print("client recieved placement confirmation.");
           lake?._handlePlacement(placementConfirmation);
         }
       },
@@ -362,7 +380,7 @@ class NertzClient {
             _socket.flush();
           },
         );
-        playerState = PlayerState.newRandom();
+        playerState = PlayerState.newRandom(lake!);
         onGameStart.call();
       },
     };
@@ -380,10 +398,9 @@ class ClientLake {
   final int _playerId;
   final LakeData lakeData;
   int _lastConfirmationId = -1;
-  void Function(LakePlacementData)? onLakeUpdated;
   void Function(LakePlacementRequest) makePlacementRequest;
 
-  final Completer<bool> cardPlacementCompleter;
+  Completer<bool>? cardPlacementCompleter;
 
   LakePlacementRequest? queuedPlacement;
 
@@ -425,13 +442,12 @@ class ClientLake {
       lakeData.placeCard(placementData.data.card, placementData.data.lakeIndex),
       "server confirmed placement that was invalid according to client's lake data",
     );
-    if (completion != null) {
-      cardPlacementCompleter.complete(completion);
-    }
     _lastConfirmationId++;
-
-    // call the update callback
-    onLakeUpdated?.call(placementData.data);
+    if (completion != null) {
+      final completer = cardPlacementCompleter;
+      cardPlacementCompleter = null;
+      completer?.complete(completion);
+    }
   }
 
   ClientLake._({
@@ -446,10 +462,12 @@ class ClientLake {
     if (queuedPlacement != null) {
       return false;
     }
-    makePlacementRequest(
-      LakePlacementRequest(LakePlacementData(_playerId, card, index)),
+    queuedPlacement = LakePlacementRequest(
+      LakePlacementData(_playerId, card, index),
     );
-    return cardPlacementCompleter.future;
+    makePlacementRequest(queuedPlacement!);
+    cardPlacementCompleter = Completer<bool>();
+    return cardPlacementCompleter!.future;
   }
 }
 
@@ -457,15 +475,40 @@ class NertzServer {
   static const int joinKeyLength = 10;
   static const int maxNameLength = 20;
 
+  late final int hostId;
+  final String hostPlayerName;
   final String joinKey;
   final ServerSocket _serverSocket;
   final List<Socket> _clients = [];
   final Map<Socket, int> _clientToId = {};
+  final Map<int, Socket> _idToClient = {};
   final Map<int, String> _idToName = {};
+  final List<String> _usedNames = [];
   int _nextPlayerId = 0;
 
   int _confirmationCounter = 0;
   LakeData? _lakeData;
+
+  int get playerCount => _clients.length;
+  String clientName(int playerId) => _idToName[playerId] ?? "Unknown Player";
+  Iterable<int> get playerIds =>
+      _clients.map((client) => _clientToId[client]!);
+
+  void kickPlayer(int playerId) {
+    if (playerId == hostId) {
+      return;
+    }
+    Socket? client = _idToClient[playerId];
+    if (client == null) {
+      return;
+    }
+    _idToClient.remove(playerId);
+    _clientToId.remove(client);
+    _idToName.remove(playerId);
+    _clients.remove(client);
+    _usedNames.remove(clientName(playerId));
+    client.close();
+  }
 
   void startGame() {
     // check that game isn't already started
@@ -485,6 +528,54 @@ class NertzServer {
         ),
       );
       client.flush();
+    }
+  }
+
+  void processJoinRequest(Socket client, JoinRequest joinRequest) {
+    // verify join key
+    if (joinRequest.joinKey == joinKey) {
+      // accept join request
+      if (_clientToId.containsKey(client)) {
+        print(
+          "Client ${client.remoteAddress.address}:${client.remotePort} attempted to join but is already in the game",
+        );
+        return;
+      }
+      if (_usedNames.contains(joinRequest.name)) {
+        print(
+          "Client ${client.remoteAddress.address}:${client.remotePort} attempted to join with duplicate name '${joinRequest.name}' but that name is already taken",
+        );
+        client.write(
+          NertzNetworkMessage.serializeMessage(JoinConfirmation(null)),
+        );
+        client.flush();
+        client.close();
+        return;
+      }
+      int playerId = _nextPlayerId++;
+      _clientToId[client] = playerId;
+      _idToName[playerId] = joinRequest.name;
+      _usedNames.add(joinRequest.name);
+      _clients.add(client);
+      print(
+        "Client ${client.remoteAddress.address}:${client.remotePort} joined with player id $playerId",
+      );
+
+      // send join confirmation
+      client.write(
+        NertzNetworkMessage.serializeMessage(JoinConfirmation(playerId)),
+      );
+      client.flush();
+    } else {
+      // reject join request
+      print(
+        "Client ${client.remoteAddress.address}:${client.remotePort} provided invalid join key, rejecting",
+      );
+      client.write(
+        NertzNetworkMessage.serializeMessage(JoinConfirmation(null)),
+      );
+      client.flush();
+      client.close();
     }
   }
 
@@ -514,51 +605,27 @@ class NertzServer {
       return;
     }
 
+    // check if this is a join request, if so handle it without checking for registration
+    if (type == JoinRequest) {
+      // deserialize request
+      final joinRequest = JoinRequest.deserialize(data);
+      if (joinRequest == null) {
+        print(
+          "Failed to deserialize join request from client ${client.remoteAddress.address}:${client.remotePort}",
+        );
+        return;
+      }
+
+      processJoinRequest(client, joinRequest);
+      return;
+    }
+
+    // ensure registration then handle data
+    if (!_clientToId.containsKey(client)) {
+      print("Recieved data from unregistered client.");
+      return;
+    }
     Map<Type, Function> actionMap = {
-      JoinRequest: () {
-        // deserialize request
-        final joinRequest = JoinRequest.deserialize(data);
-        if (joinRequest == null) {
-          print(
-            "Failed to deserialize join request from client ${client.remoteAddress.address}:${client.remotePort}",
-          );
-          return;
-        }
-
-        // verify join key
-        if (joinRequest.joinKey == joinKey) {
-          // accept join request
-          if (_clientToId.containsKey(client)) {
-            print(
-              "Client ${client.remoteAddress.address}:${client.remotePort} attempted to join but is already in the game",
-            );
-            return;
-          }
-          int playerId = _nextPlayerId++;
-          _clientToId[client] = playerId;
-          _idToName[playerId] = joinRequest.name;
-          _clients.add(client);
-          print(
-            "Client ${client.remoteAddress.address}:${client.remotePort} joined with player id $playerId",
-          );
-
-          // send join confirmation
-          client.write(
-            NertzNetworkMessage.serializeMessage(JoinConfirmation(playerId)),
-          );
-          client.flush();
-        } else {
-          // reject join request
-          print(
-            "Client ${client.remoteAddress.address}:${client.remotePort} provided invalid join key, rejecting",
-          );
-          client.write(
-            NertzNetworkMessage.serializeMessage(JoinConfirmation(null)),
-          );
-          client.flush();
-        }
-      },
-
       LakePlacementRequest: () {
         // deserialize request
         final placementRequest = LakePlacementRequest.deserialize(data);
@@ -573,12 +640,6 @@ class NertzServer {
         if (_lakeData == null) {
           print(
             "Received lake placement request before game started, ignoring",
-          );
-          return;
-        }
-        if (!_clientToId.containsKey(client)) {
-          print(
-            "Received lake placement request from client ${client.remoteAddress.address}:${client.remotePort} who is not in the game, ignoring",
           );
           return;
         }
@@ -632,7 +693,7 @@ class NertzServer {
         );
   }
 
-  NertzServer._(this._serverSocket, this.joinKey) {
+  NertzServer._(this._serverSocket, this.joinKey, this.hostPlayerName) {
     _serverSocket.listen(_handleConnection);
   }
 
@@ -648,9 +709,27 @@ class NertzServer {
     );
   }
 
-  static Future<NertzServer> bind(String address, int port) async {
+  static Future<({NertzServer server, NertzClient client})> bind({
+    required String address,
+    required int port,
+    required String hostPlayerName,
+    required void Function() onGameStart,
+  }) async {
     ServerSocket serverSocket = await ServerSocket.bind(address, port);
     final joinKey = generateJoinKey();
-    return NertzServer._(serverSocket, joinKey);
+    final server = NertzServer._(serverSocket, joinKey, hostPlayerName);
+    final client = await NertzClient.connect(
+      host: serverSocket.address.address,
+      port: serverSocket.port,
+      joinKey: joinKey,
+      playerName: hostPlayerName,
+      onGameStart: onGameStart,
+    );
+    if (client == null) {
+      serverSocket.close();
+      throw Exception("Failed to connect to same-device server");
+    }
+    server.hostId = client.playerId!;
+    return (server: server, client: client);
   }
 }

@@ -77,6 +77,7 @@ class _PlayerUiState extends State<PlayerUi> {
     }
 
     if (playerState.handOccupied) {
+      /// check if river is being placed onto
       for (int riverIndex = 0; riverIndex < 4; riverIndex++) {
         if (keyContainsPosition(_riverStackKeys[riverIndex])) {
           setState(() {
@@ -85,18 +86,23 @@ class _PlayerUiState extends State<PlayerUi> {
           return;
         }
       }
-      for (int suitIndex = 0; suitIndex < 4; suitIndex++) { 
-        for (int stackIndex = 0; stackIndex < playerCount; stackIndex++) {
+
+      /// check if lake is being placed onto
+      for (int suitIndex = 0; suitIndex < 4; suitIndex++) {
+        for (int rowIndex = 0; rowIndex < playerCount; rowIndex++) {
           if (keyContainsPosition(
-            _lakeStackKeys[suitIndex * playerCount + stackIndex],
+            _lakeStackKeys[suitIndex * playerCount + rowIndex],
           )) {
             final suit = CardSuit.values[suitIndex];
-            if (playerState.handSize > 1 || playerState.handBottomSuit! != suit) {
+            if (playerState.handSize > 1 ||
+                playerState.handBottomSuit! != suit) {
               setState(() => playerState.handleCommand(CancelHandCommand()));
-              return;
+            } else {
+              print("Placing card in lake suit $suitIndex stack $rowIndex");
+              playerState
+                  .handleAsyncCommand(HandToLakeCommand(rowIndex))
+                  .then((success) => setState(() {}));
             }
-            print("Placing card in lake suit $suitIndex stack $stackIndex");
-            setState(() => playerState.handleCommand(CancelHandCommand()));
             return;
           }
         }
