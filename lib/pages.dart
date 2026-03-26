@@ -15,6 +15,9 @@ class MainState {
   /// the page currently being displayed
   PageType page = PageType.home;
 
+  /// games that were discovered
+  List<PotentialGame> discoveredGames = [];
+
   MainState();
 }
 
@@ -60,11 +63,13 @@ class HomePage extends StatelessWidget {
 class HostingPage extends StatefulWidget {
   final MainState mainState;
   final Function() onGameStart;
+  final Function() onServerFailure;
 
   const HostingPage({
     super.key,
     required this.mainState,
     required this.onGameStart,
+    required this.onServerFailure,
   });
 
   @override
@@ -80,20 +85,31 @@ class _HostingPageState extends State<HostingPage> {
     super.initState();
     mainState = widget.mainState;
 
-    NertzServer.bind(
-      address: 'localhost',
-      port: 8080,
-      hostPlayerName: "host player",
-      onGameStart: () {
-        mainState.page = PageType.game;
-        widget.onGameStart();
-      },
-    ).then((result) {
-      setState(() {
-        mainState.server = result.server;
-        mainState.client = result.client;
-      });
-    });
+    void handleFailure(Object? error) {
+      print("Failed to start server: $error");
+      mainState.server = null;
+      mainState.client = null;
+      mainState.page = PageType.home;
+      widget.onServerFailure();
+    }
+
+    try {
+      NertzServer.bind(
+        hostPlayerName: "Sam",
+        onGameStart: () {
+          mainState.page = PageType.game;
+          widget.onGameStart();
+        },
+      ).then((result) {
+        setState(() {
+          mainState.server = result.server;
+          mainState.client = result.client;
+        });
+      }, onError: handleFailure);
+    } catch (e) {
+      print("Failed to start server: $e");
+      handleFailure(e);
+    }
   }
 
   @override
@@ -109,24 +125,28 @@ class _HostingPageState extends State<HostingPage> {
         ),
       );
     }
+    var joinKeyStyle = Theme.of(context).textTheme.headlineLarge;
+    if (joinKeyStyle != null) {
+      joinKeyStyle = joinKeyStyle.copyWith(fontFamily: "RobotoMono");
+    }
     final List<Widget> children = [
       Text('Join Code:', style: Theme.of(context).textTheme.headlineSmall),
-      Text(
-        mainState.server!.joinKey,
-        style: Theme.of(context).textTheme.headlineLarge,
-      ),
+      Text(mainState.server!.joinKey, style: joinKeyStyle),
       SizedBox(height: 20),
       Text(
         "${mainState.server!.hostPlayerName}'s Server",
         style: Theme.of(context).textTheme.headlineMedium,
+        textAlign: .center,
       ),
       Divider(indent: 20, endIndent: 20),
     ];
     for (int playerId in mainState.server!.playerIds) {
       var cardChildren = <Widget>[
-        Text(
-          mainState.server!.clientName(playerId),
-          style: Theme.of(context).textTheme.titleLarge,
+        Expanded(
+          child: Text(
+            mainState.server!.clientName(playerId),
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
         ),
       ];
       if (playerId != mainState.server!.hostId) {
@@ -150,6 +170,7 @@ class _HostingPageState extends State<HostingPage> {
           width: 300,
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: cardChildren,
           ),
         ),
@@ -204,6 +225,32 @@ class _GamePageState extends State<GamePage> {
       playerState: mainState.client!.playerState!,
       lakeState: mainState.client!.lake!,
       playerCount: mainState.client!.playerCount!,
+    );
+  }
+}
+
+class JoiningPage extends StatefulWidget {
+  final MainState mainState;
+
+  const JoiningPage({super.key, required this.mainState});
+
+  @override
+  State<JoiningPage> createState() => _JoiningPageState();
+}
+
+class _JoiningPageState extends State<JoiningPage> {
+  late final MainState mainState;
+
+  @override
+  void initState() {
+    super.initState();
+    mainState = widget.mainState;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Text("Joining page not implemented yet"),
     );
   }
 }

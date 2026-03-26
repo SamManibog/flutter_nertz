@@ -1,17 +1,37 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter_nertz/nertz_networking.dart';
 import 'package:flutter_nertz/pages.dart';
 
 // todo:
 // - implement UDP broadcasts for LAN game discovery and connection
 // - implement lobby page with player list and start game button
-// - implement player kicking functionality for hosts
 // - implement joining page
 // - implement error handling for network messages
 // - implement play again functionality
 // - implement winning screen
+// - implement game state synchronization and latency compensation
+// - implement connection loss handling and reconnection logic
+// - implement connection limits
 
 void main() async {
   final MainState mainState = MainState();
+
+  var socketListener = await RawDatagramSocket.bind(
+    "255.255.255.255",
+    discoveryPort,
+  );
+  socketListener.listen((event) {
+    if (event == RawSocketEvent.read) {
+      final datagram = socketListener.receive();
+      if (datagram != null) {
+        print(
+          "Received datagram from ${datagram.address.address}:${datagram.port}: ${String.fromCharCodes(datagram.data)}",
+        );
+      }
+    }
+  });
 
   runApp(MyApp(mainState: mainState));
 }
@@ -63,6 +83,7 @@ class _MyAppContentsState extends State<MyAppContents> {
       case PageType.hosting:
         currentPage = HostingPage(
           mainState: mainState,
+          onServerFailure: () => setState(() {}),
           onGameStart: () => setState(() {}),
         );
         break;
@@ -74,8 +95,6 @@ class _MyAppContentsState extends State<MyAppContents> {
         currentPage = GamePage(mainState: mainState);
         break;
     }
-    return Scaffold(
-      body: SafeArea(child: currentPage)
-    );
+    return Scaffold(body: SafeArea(child: currentPage));
   }
 }

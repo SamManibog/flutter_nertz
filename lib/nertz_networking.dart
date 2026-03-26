@@ -4,8 +4,46 @@ import 'dart:io';
 import 'dart:math';
 import 'package:flutter_nertz/nertz.dart';
 
+const discoveryPort = 50193;
+
 final playerNameRegex = RegExp(r'^[a-zA-Z0-9_!.? ]+$');
 final maxNameLength = 20;
+
+String nertzAdvertizementMessage(int port, String hostPlayerName) {
+  return jsonEncode({
+    "port": port,
+    "hostPlayerName": hostPlayerName,
+    "validator": "this is a flutter_nertz advertizement message",
+  });
+}
+
+class PotentialGame {
+  final String hostPlayerName;
+  final String hostAddress;
+  final String hostPort;
+
+  PotentialGame._(this.hostPlayerName, this.hostAddress, this.hostPort);
+
+  /// attempts to parse a potential game from the given advertizement message and host address, returns null if invalid
+  static PotentialGame? fromAdvertizementMessage(String message, String hostAddress) {
+    try {
+      final decoded = jsonDecode(message);
+      if (decoded == null) {
+        return null;
+      }
+      if (decoded["validator"] != "this is a flutter_nertz advertizement message") {
+        return null;
+      }
+      return PotentialGame._(
+        decoded["hostPlayerName"],
+        hostAddress,
+        decoded["port"].toString(),
+      );
+    } catch (e) {
+      return null;
+    }
+  }
+}
 
 /// returns true if the given string is a valid player name
 bool isValidPlayerName(String name) {
@@ -37,6 +75,7 @@ const Map<Type, int> typeToIdMap = {
   PlayerCountRequest: 4,
   PlayerCountAnswer: 5,
   JoinRequest: 6,
+  LakePlacementFailure: 7,
 };
 
 /// a map from numeric type ids to their network message types, used for deserialization
@@ -48,6 +87,7 @@ const Map<int, Type> idToTypeMap = {
   4: PlayerCountRequest,
   5: PlayerCountAnswer,
   6: JoinRequest,
+  7: LakePlacementFailure,
 };
 
 sealed class NertzNetworkMessage {
@@ -156,6 +196,19 @@ class PlayerCountAnswer extends NertzNetworkMessage {
   static PlayerCountAnswer? deserialize(String data) {
     final decoded = jsonDecode(data);
     return PlayerCountAnswer(decoded["playerCount"]);
+  }
+}
+
+class LakePlacementFailure extends NertzNetworkMessage {
+  const LakePlacementFailure();
+
+  @override
+  String serialize() {
+    return jsonEncode({});
+  }
+
+  static LakePlacementFailure? deserialize(String data) {
+    return LakePlacementFailure();
   }
 }
 
@@ -279,7 +332,6 @@ class NertzClient {
         ),
       );
       await socket.flush();
-      print("Join request sent, waiting for confirmation...");
 
       // get join confirmation
       final initSuccess = await client._initCompleter!.future;
@@ -325,6 +377,11 @@ class NertzClient {
     }
 
     Map<Type, Function> actionMap = {
+      LakePlacementFailure: () {
+        print("client recieved lake placement failure");
+        lake?.cancelPlacement();
+      },
+
       LakePlacementConfirmation: () {
         final placementConfirmation = LakePlacementConfirmation.deserialize(
           data,
@@ -404,6 +461,15 @@ class ClientLake {
 
   LakePlacementRequest? queuedPlacement;
 
+  void cancelPlacement() {
+    if (queuedPlacement != null) {
+      queuedPlacement = null;
+      final completer = cardPlacementCompleter;
+      cardPlacementCompleter = null;
+      completer?.complete(false);
+    }
+  }
+
   void _handlePlacement(LakePlacementConfirmation placementData) {
     // check that confirmations are in order
     assert(
@@ -474,11 +540,19 @@ class ClientLake {
 class NertzServer {
   static const int joinKeyLength = 10;
   static const int maxNameLength = 20;
+  static const int advertizementInterval = 3;
 
   late final int hostId;
   final String hostPlayerName;
   final String joinKey;
+
+  /// the socket that the game is run on
   final ServerSocket _serverSocket;
+
+  /// the socket used to allow other devices to find the game on the local network
+  RawDatagramSocket? _gameAdvertizementSocket;
+  Timer? _advertizementTimer;
+
   final List<Socket> _clients = [];
   final Map<Socket, int> _clientToId = {};
   final Map<int, Socket> _idToClient = {};
@@ -491,8 +565,7 @@ class NertzServer {
 
   int get playerCount => _clients.length;
   String clientName(int playerId) => _idToName[playerId] ?? "Unknown Player";
-  Iterable<int> get playerIds =>
-      _clients.map((client) => _clientToId[client]!);
+  Iterable<int> get playerIds => _clients.map((client) => _clientToId[client]!);
 
   void kickPlayer(int playerId) {
     if (playerId == hostId) {
@@ -515,6 +588,12 @@ class NertzServer {
     if (_lakeData != null) {
       return;
     }
+
+    // halt advertizement of the game on the local network
+    _advertizementTimer?.cancel();
+    _advertizementTimer = null;
+    _gameAdvertizementSocket?.close();
+    _gameAdvertizementSocket = null;
 
     // initialize data
     _lakeData = LakeData.withSize(_clients.length);
@@ -651,11 +730,12 @@ class NertzServer {
           return;
         }
 
-        // attempt to place the card, and if successful, send a confirmation to all clients
+        // attempt to place the card
         if (_lakeData!.placeCard(
           placementRequest.data.card,
           placementRequest.data.lakeIndex,
         )) {
+          // if successful, send a confirmation to all clients
           final confirmation = LakePlacementConfirmation(
             placementRequest.data,
             _confirmationCounter++,
@@ -664,6 +744,12 @@ class NertzServer {
             c.write(NertzNetworkMessage.serializeMessage(confirmation));
             c.flush();
           }
+        } else {
+          // if unsuccessful, send a failure message to the client
+          client.write(
+            NertzNetworkMessage.serializeMessage(LakePlacementFailure()),
+          );
+          client.flush();
         }
       },
     };
@@ -710,26 +796,61 @@ class NertzServer {
   }
 
   static Future<({NertzServer server, NertzClient client})> bind({
-    required String address,
-    required int port,
     required String hostPlayerName,
     required void Function() onGameStart,
   }) async {
-    ServerSocket serverSocket = await ServerSocket.bind(address, port);
-    final joinKey = generateJoinKey();
-    final server = NertzServer._(serverSocket, joinKey, hostPlayerName);
-    final client = await NertzClient.connect(
-      host: serverSocket.address.address,
-      port: serverSocket.port,
-      joinKey: joinKey,
-      playerName: hostPlayerName,
-      onGameStart: onGameStart,
-    );
+    // create game socket
+    late final ServerSocket serverSocket;
+    late final String joinKey;
+    late final NertzServer server;
+    final NertzClient? client;
+    try {
+      serverSocket = await ServerSocket.bind('0.0.0.0', 0);
+      joinKey = generateJoinKey();
+      server = NertzServer._(serverSocket, joinKey, hostPlayerName);
+      client = await NertzClient.connect(
+        host: serverSocket.address.address,
+        port: serverSocket.port,
+        joinKey: joinKey,
+        playerName: hostPlayerName,
+        onGameStart: onGameStart,
+      );
+    } catch (e) {
+      rethrow;
+    }
+
     if (client == null) {
       serverSocket.close();
       throw Exception("Failed to connect to same-device server");
     }
     server.hostId = client.playerId!;
+
+    // create advertizement socket
+    try {
+      // create the udp socket
+      server._gameAdvertizementSocket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        discoveryPort,
+      );
+      server._gameAdvertizementSocket!.broadcastEnabled = true;
+
+      // periodically sent advertizement messages on broadcast channel
+      final message = nertzAdvertizementMessage(serverSocket.port, hostPlayerName).codeUnits;
+      server._advertizementTimer = Timer.periodic(
+        Duration(seconds: advertizementInterval),
+        (_) {
+          server._gameAdvertizementSocket!.send(
+            message,
+            InternetAddress("255.255.255.255"),
+            discoveryPort,
+          );
+        },
+      );
+    } catch (e) {
+      serverSocket.close();
+      throw Exception("Failed to create game advertizement socket");
+    }
+
     return (server: server, client: client);
   }
 }
