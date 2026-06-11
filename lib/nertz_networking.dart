@@ -19,29 +19,52 @@ String nertzAdvertizementMessage(int port, String hostPlayerName) {
 
 class PotentialGame {
   final String hostPlayerName;
-  final String hostAddress;
-  final String hostPort;
+  final InternetAddress hostAddress;
+  final int hostPort;
+
+  /// creates a dummy potential game, only for testing purposes. do not join it lol
+  PotentialGame.dummy()
+    : hostPlayerName = "Tester",
+      hostAddress = InternetAddress("127.0.0.1"),
+      hostPort = 0;
 
   PotentialGame._(this.hostPlayerName, this.hostAddress, this.hostPort);
 
   /// attempts to parse a potential game from the given advertizement message and host address, returns null if invalid
-  static PotentialGame? fromAdvertizementMessage(String message, String hostAddress) {
+  static PotentialGame? fromAdvertizementMessage(
+    String message,
+    InternetAddress hostAddress,
+  ) {
     try {
       final decoded = jsonDecode(message);
       if (decoded == null) {
         return null;
       }
-      if (decoded["validator"] != "this is a flutter_nertz advertizement message") {
+      if (decoded["validator"] !=
+          "this is a flutter_nertz advertizement message") {
         return null;
       }
       return PotentialGame._(
         decoded["hostPlayerName"],
         hostAddress,
-        decoded["port"].toString(),
+        decoded["port"],
       );
     } catch (e) {
       return null;
     }
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return other is PotentialGame &&
+        other.hostPlayerName == hostPlayerName &&
+        other.hostAddress == hostAddress &&
+        other.hostPort == hostPort;
+  }
+
+  @override
+  int get hashCode {
+    return Object.hash(hostPlayerName, hostAddress, hostPort);
   }
 }
 
@@ -72,10 +95,12 @@ const Map<Type, int> typeToIdMap = {
   LakePlacementConfirmation: 1,
   GameStartNotification: 2,
   JoinConfirmation: 3,
-  PlayerCountRequest: 4,
-  PlayerCountAnswer: 5,
+  PlayerListRequest: 4,
+  PlayerListUpdate: 5,
   JoinRequest: 6,
   LakePlacementFailure: 7,
+  WinnerUpdate: 8,
+  WinDeclaration: 9,
 };
 
 /// a map from numeric type ids to their network message types, used for deserialization
@@ -84,10 +109,12 @@ const Map<int, Type> idToTypeMap = {
   1: LakePlacementConfirmation,
   2: GameStartNotification,
   3: JoinConfirmation,
-  4: PlayerCountRequest,
-  5: PlayerCountAnswer,
+  4: PlayerListRequest,
+  5: PlayerListUpdate,
   6: JoinRequest,
   7: LakePlacementFailure,
+  8: WinnerUpdate,
+  9: WinDeclaration,
 };
 
 sealed class NertzNetworkMessage {
@@ -109,6 +136,73 @@ sealed class NertzNetworkMessage {
     final Type? type = idToTypeMap[decoded["type"]];
     final String? messageData = decoded["data"];
     return (type != null && messageData != null) ? (type, messageData) : null;
+  }
+}
+
+class WinDeclaration extends NertzNetworkMessage {
+  const WinDeclaration();
+
+  @override
+  String serialize() {
+    return jsonEncode({});
+  }
+
+  static WinDeclaration? deserialize(String data) {
+    return WinDeclaration();
+  }
+}
+
+class WinnerUpdate extends NertzNetworkMessage {
+  final int winnerId;
+
+  const WinnerUpdate(this.winnerId);
+
+  @override
+  String serialize() {
+    return jsonEncode({"winnerId": winnerId});
+  }
+
+  static WinnerUpdate? deserialize(String data) {
+    final decoded = jsonDecode(data);
+    final int? winnerId = decoded["winnerId"];
+    if (winnerId == null) {
+      return null;
+    }
+    return WinnerUpdate(winnerId);
+  }
+}
+
+class PlayerListUpdate extends NertzNetworkMessage {
+  final Map<int, String> playerNames;
+  final int hostId;
+
+  const PlayerListUpdate(this.playerNames, this.hostId);
+
+  @override
+  String serialize() {
+    return jsonEncode({"playerNames": playerNames, "hostId": hostId});
+  }
+
+  static PlayerListUpdate? deserialize(String data) {
+    final decoded = jsonDecode(data);
+    final Map<String, dynamic>? playerNamesDynamic = decoded["playerNames"];
+    if (playerNamesDynamic == null) {
+      return null;
+    }
+    final Map<int, String> playerNames = {};
+    for (var entry in playerNamesDynamic.entries) {
+      final int? playerId = int.tryParse(entry.key);
+      final String? name = entry.value;
+      if (playerId == null || name == null) {
+        return null;
+      }
+      playerNames[playerId] = name;
+    }
+    final int? hostId = decoded["hostId"];
+    if (hostId == null) {
+      return null;
+    }
+    return PlayerListUpdate(playerNames, hostId);
   }
 }
 
@@ -170,32 +264,16 @@ class JoinConfirmation extends NertzNetworkMessage {
   }
 }
 
-class PlayerCountRequest extends NertzNetworkMessage {
-  const PlayerCountRequest();
+class PlayerListRequest extends NertzNetworkMessage {
+  const PlayerListRequest();
 
   @override
   String serialize() {
     return jsonEncode({});
   }
 
-  static PlayerCountRequest? deserialize(String data) {
-    return PlayerCountRequest();
-  }
-}
-
-class PlayerCountAnswer extends NertzNetworkMessage {
-  final int playerCount;
-
-  const PlayerCountAnswer(this.playerCount);
-
-  @override
-  String serialize() {
-    return jsonEncode({"playerCount": playerCount});
-  }
-
-  static PlayerCountAnswer? deserialize(String data) {
-    final decoded = jsonDecode(data);
-    return PlayerCountAnswer(decoded["playerCount"]);
+  static PlayerListRequest? deserialize(String data) {
+    return PlayerListRequest();
   }
 }
 
@@ -296,15 +374,26 @@ class NertzClient {
   /// the player's id in the game, assigned by the server
   int? playerId;
 
+  /// the list of players in the game
+  Map<int, String> playerNames = {};
+
+  /// the id of the host player
+  int? hostId;
+
   int? playerCount;
   ClientLake? lake;
   PlayerState? playerState;
 
   final void Function() onGameStart;
+  final void Function() onPlayerListUpdated;
+  final void Function() onGameEnd;
+
+  int? winnerId() => lake?.winnerId;
 
   // creates a new client with the given socket, you must wait until _initCompleter is completed with a true value
   // before using the client
-  NertzClient._(Socket socket, this.onGameStart) : _socket = socket {
+  NertzClient._(Socket socket, this.onGameStart, this.onPlayerListUpdated, this.onGameEnd)
+    : _socket = socket {
     //_socketSubscription =
     _socket.map((data) => utf8.decode(data)).listen(_onData);
   }
@@ -315,10 +404,17 @@ class NertzClient {
     required String playerName,
     required String joinKey,
     required void Function() onGameStart,
+    required void Function() onPlayerListUpdated,
+    required void Function() onGameEnd,
   }) async {
     try {
       Socket socket = await Socket.connect(host, port);
-      NertzClient client = NertzClient._(socket, onGameStart);
+      NertzClient client = NertzClient._(
+        socket,
+        onGameStart,
+        onPlayerListUpdated,
+        onGameEnd,
+      );
 
       // request to join the game with the given join key
       late final String safeName = fixPlayerName(playerName);
@@ -377,6 +473,14 @@ class NertzClient {
     }
 
     Map<Type, Function> actionMap = {
+      WinnerUpdate: () {
+        final winnerUpdate = WinnerUpdate.deserialize(data);
+        if (winnerUpdate != null) {
+          lake?.winnerId = winnerUpdate.winnerId;
+          onGameEnd.call();
+        }
+      },
+
       LakePlacementFailure: () {
         print("client recieved lake placement failure");
         lake?.cancelPlacement();
@@ -392,11 +496,18 @@ class NertzClient {
         }
       },
 
-      PlayerCountAnswer: () {
-        final playerCountAnswer = PlayerCountAnswer.deserialize(data);
-        if (playerCountAnswer != null) {
-          playerCount = playerCountAnswer.playerCount;
+      PlayerListUpdate: () {
+        final playerListUpdate = PlayerListUpdate.deserialize(data);
+        if (playerListUpdate == null) {
+          return;
         }
+        playerNames.clear();
+        for (final player in playerListUpdate.playerNames.entries) {
+          playerNames[player.key] = player.value;
+        }
+        hostId = playerListUpdate.hostId;
+
+        onPlayerListUpdated.call();
       },
 
       JoinConfirmation: () {
@@ -456,6 +567,9 @@ class ClientLake {
   final LakeData lakeData;
   int _lastConfirmationId = -1;
   void Function(LakePlacementRequest) makePlacementRequest;
+
+  /// the id of the winning player
+  int? winnerId;
 
   Completer<bool>? cardPlacementCompleter;
 
@@ -525,6 +639,9 @@ class ClientLake {
 
   /// attempts to place a card in the lake, returning true if successful
   Future<bool> placeCard(PlayingCard card, int index) async {
+    if (winnerId != null) {
+      return false;
+    }
     if (queuedPlacement != null) {
       return false;
     }
@@ -563,9 +680,13 @@ class NertzServer {
   int _confirmationCounter = 0;
   LakeData? _lakeData;
 
+  int? winnerId;
+
   int get playerCount => _clients.length;
   String clientName(int playerId) => _idToName[playerId] ?? "Unknown Player";
   Iterable<int> get playerIds => _clients.map((client) => _clientToId[client]!);
+  String get gameAddress =>
+      "${_serverSocket.address.host}:${_serverSocket.port}";
 
   void kickPlayer(int playerId) {
     if (playerId == hostId) {
@@ -581,6 +702,12 @@ class NertzServer {
     _clients.remove(client);
     _usedNames.remove(clientName(playerId));
     client.close();
+  }
+
+  void restartGame() {
+    _lakeData = null;
+    winnerId = null;
+    startGame();
   }
 
   void startGame() {
@@ -658,6 +785,16 @@ class NertzServer {
     }
   }
 
+  /// gets the player list update message based on the current players
+  PlayerListUpdate _getPlayerListUpdate() {
+    return PlayerListUpdate(
+      Map.fromEntries(
+        _idToName.entries.map((entry) => MapEntry(entry.key, entry.value)),
+      ),
+      hostId,
+    );
+  }
+
   void _onClientData(Socket client, String wrappedData) async {
     print(
       "recieved data from client ${client.remoteAddress.address}:${client.remotePort}: $wrappedData",
@@ -696,6 +833,13 @@ class NertzServer {
       }
 
       processJoinRequest(client, joinRequest);
+
+      // send a player list update to all players
+      final playerListUpdate = _getPlayerListUpdate();
+      for (var c in _clientToId.keys) {
+        c.write(NertzNetworkMessage.serializeMessage(playerListUpdate));
+        c.flush();
+      }
       return;
     }
 
@@ -705,6 +849,35 @@ class NertzServer {
       return;
     }
     Map<Type, Function> actionMap = {
+      WinDeclaration: () {
+        final winDeclaration = WinDeclaration.deserialize(data);
+        if (winDeclaration == null) {
+          print(
+            "Failed to deserialize win declaration from client ${client.remoteAddress.address}:${client.remotePort}",
+          );
+          return;
+        }
+        int playerId = _clientToId[client]!;
+        if (winnerId != null) {
+          print(
+            "Received win declaration from client ${client.remoteAddress.address}:${client.remotePort} but player ${clientName(playerId)} has already won",
+          );
+          return;
+        }
+        winnerId = playerId;
+        final winnerUpdate = WinnerUpdate(winnerId!);
+        for (var c in _clients) {
+          c.write(NertzNetworkMessage.serializeMessage(winnerUpdate));
+          c.flush();
+        }
+      },
+
+      PlayerListRequest: () {
+        final playerListUpdate = _getPlayerListUpdate();
+        client.write(NertzNetworkMessage.serializeMessage(playerListUpdate));
+        client.flush();
+      },
+
       LakePlacementRequest: () {
         // deserialize request
         final placementRequest = LakePlacementRequest.deserialize(data);
@@ -732,9 +905,10 @@ class NertzServer {
 
         // attempt to place the card
         if (_lakeData!.placeCard(
-          placementRequest.data.card,
-          placementRequest.data.lakeIndex,
-        )) {
+              placementRequest.data.card,
+              placementRequest.data.lakeIndex,
+            ) &&
+            winnerId == null) {
           // if successful, send a confirmation to all clients
           final confirmation = LakePlacementConfirmation(
             placementRequest.data,
@@ -798,6 +972,8 @@ class NertzServer {
   static Future<({NertzServer server, NertzClient client})> bind({
     required String hostPlayerName,
     required void Function() onGameStart,
+    required void Function() onPlayerListUpdated,
+    required void Function() onGameEnd,
   }) async {
     // create game socket
     late final ServerSocket serverSocket;
@@ -814,6 +990,8 @@ class NertzServer {
         joinKey: joinKey,
         playerName: hostPlayerName,
         onGameStart: onGameStart,
+        onPlayerListUpdated: onPlayerListUpdated,
+        onGameEnd: onGameEnd,
       );
     } catch (e) {
       rethrow;
@@ -835,7 +1013,10 @@ class NertzServer {
       server._gameAdvertizementSocket!.broadcastEnabled = true;
 
       // periodically sent advertizement messages on broadcast channel
-      final message = nertzAdvertizementMessage(serverSocket.port, hostPlayerName).codeUnits;
+      final message = nertzAdvertizementMessage(
+        serverSocket.port,
+        hostPlayerName,
+      ).codeUnits;
       server._advertizementTimer = Timer.periodic(
         Duration(seconds: advertizementInterval),
         (_) {
@@ -848,9 +1029,19 @@ class NertzServer {
       );
     } catch (e) {
       serverSocket.close();
+      client.dispose();
       throw Exception("Failed to create game advertizement socket");
     }
 
     return (server: server, client: client);
+  }
+
+  void dispose() {
+    for (var client in _clients) {
+      client.close();
+    }
+    _serverSocket.close();
+    _gameAdvertizementSocket?.close();
+    _advertizementTimer?.cancel();
   }
 }

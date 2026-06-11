@@ -1,38 +1,19 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
-import 'package:flutter_nertz/nertz_networking.dart';
 import 'package:flutter_nertz/pages.dart';
 
 // todo:
-// - implement UDP broadcasts for LAN game discovery and connection
-// - implement lobby page with player list and start game button
-// - implement joining page
+// - implement lobby page with player list for joining players (Needs tests)
 // - implement error handling for network messages
 // - implement play again functionality
 // - implement winning screen
-// - implement game state synchronization and latency compensation
+// - implement latency compensation
 // - implement connection loss handling and reconnection logic
 // - implement connection limits
+// - cleanup widget tree
+// - add back buttons
 
 void main() async {
   final MainState mainState = MainState();
-
-  var socketListener = await RawDatagramSocket.bind(
-    "255.255.255.255",
-    discoveryPort,
-  );
-  socketListener.listen((event) {
-    if (event == RawSocketEvent.read) {
-      final datagram = socketListener.receive();
-      if (datagram != null) {
-        print(
-          "Received datagram from ${datagram.address.address}:${datagram.port}: ${String.fromCharCodes(datagram.data)}",
-        );
-      }
-    }
-  });
-
   runApp(MyApp(mainState: mainState));
 }
 
@@ -73,6 +54,13 @@ class _MyAppContentsState extends State<MyAppContents> {
   @override
   Widget build(BuildContext context) {
     late final Widget currentPage;
+    if (mainState.page == PageType.searching) {
+      mainState.allowDiscovery = true;
+    } else {
+      mainState.allowDiscovery = false;
+      mainState.discoverySocket?.close();
+      mainState.discoverySocket = null;
+    }
     switch (mainState.page) {
       case PageType.home:
         currentPage = HomePage(
@@ -85,14 +73,32 @@ class _MyAppContentsState extends State<MyAppContents> {
           mainState: mainState,
           onServerFailure: () => setState(() {}),
           onGameStart: () => setState(() {}),
+          onPlayerListUpdated: () => setState(() {}),
+          onGameEnd: () => setState(() {}),
+        );
+        break;
+      case PageType.searching:
+        currentPage = SearchingPage(
+          mainState: mainState,
+          onGameSelected: () => setState(() {}),
         );
         break;
       case PageType.joining:
-        throw UnimplementedError("Joining page not implemented yet");
-        //currentPage = JoiningPage(mainState: mainState);
+        currentPage = JoiningPage(
+          mainState: mainState,
+          onGameStart: () => setState(() {}),
+          onPlayerListUpdated: () => setState(() {}),
+          onGameEnd: () => setState(() {}),
+        );
+        break;
+      case PageType.lobby:
+        currentPage = LobbyPage(mainState: mainState);
         break;
       case PageType.game:
         currentPage = GamePage(mainState: mainState);
+        break;
+      case PageType.gameOver:
+        currentPage = GameOverPage(mainState: mainState);
         break;
     }
     return Scaffold(body: SafeArea(child: currentPage));
